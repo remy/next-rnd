@@ -1,0 +1,581 @@
+#autoline 10
+#autostart 10
+#program rnd
+
+# *** INTRODUCTION ****
+# Where I've used "#" for a comment, I'm giving you, the reader, more insight.
+# When I've commented using ";" these appeared in the original source.
+#
+# The requirements for this ...thing, was to generate a random number between
+# 1 and 5233 but excluding the number 5000. For a truly random number, we need
+# some kind of natural input, like the time to complete a task. So this is the
+# concept for this generator.
+#
+# You're tasked with saving the glitching Numerics from the evil nanobots. Your
+# ship is in a loop around the number as they glitch in and out of different
+# values and you must fire at and blow up the "glitch field". Once complete, the
+# glitch stops and you're given a random number.
+#
+# -------------------
+#
+# ** Code features **
+#
+# > Glitching @ DEFPROC glitch()
+# I manually modify bank 5 to create the glitch effect, shifting bytes left and
+# right. I need to be especially careful as bank 5 holds screen data for for the
+# first 6144 bytes but then the next 2K is system variables used by SYSVARS and
+# CHANS and possibly more - pg 280 of the manual. The second half of the screen
+# then starts at 8192 offset. I'm also only glitching the bytes with the numbers
+# avoiding anything left or right or higher or lower so that I can call the
+# glitch as quickly as I can without too much screen interruption.
+#
+# > Player's path @ DEFPROC initOnce() (towards the end)
+# The player rotates around an octogon path. This path is calculated ahead of
+# time and not calcuated on the fly in NextBASIC. The shape is a triangle wave
+# form with some edge cases. My "native tounge" is JavaScript so I wrote code
+# to generate this list of data points for me. The result is a single 16bit
+# value that represents X and Y together via X being the MSB(yte) and the Y
+# being the LSB. To get the values out I would do: x=v >> 6; y=v & 0x00ff which
+# makes the storing of values nice. Then as the game plays a pointer is
+# incremented that moves through the array of coordinates.
+#
+# > Scroller / marquee @ DEFPROC scroller() & DEFPROC scrollerSetup()
+# A quick and dirty scroll effect using sprites that are scaled to 32px. I place
+# the sprites across the bottom of the screen from the far left x(0) to the last
+# position x(288) and use the 32px border to hide the first and last sprite.
+# The animation moves through 32 pixels to the left, and once the X axis stops
+# animating (and I'm constantly checking) the sprite patterns are shuffled
+# across to the left and the animation is started again.
+# If the sprite patten is 0 - this is assumed to be an empty sprite and thus a
+# new pattern needs to be picked. This is collected from DEFPROC getLetter,
+# which is able to loop through an array of single characters and pick out the
+# next due character. Right before the scroller starts, the "0000" string is
+# replaced with the "winning" number to add a bit of dynamic effect.
+#
+# > Sound effect @ DRIVER 49...
+# I'm using my ayfx driver and the port of Shiru's interface I made, calling the
+# effects on demand. Since the driver works on the Next's interrupt system, the
+# audio doesn't block or hang the game play. Details: https://git.io/JUgDK
+#
+#
+# The coding for this took probably about 3-4 days in total, mostly making small
+# refinements to get it feeling smooth enough to play with. It's a nice short
+# block of code that I managed to learn and make new tools from and specifically
+# upgrading https://zx.remysharp.com/sprites with some useful new features.
+#
+# Thanks for reading and I hope you enjoy the "game", and the source.
+#
+# - Remy, September 2020.
+
+# ------------------------------------------------------------------------------
+
+# The starting lines are used by the txt2bas generator. I wrote my own but it
+# has parity the version found on the Spectrum Next.
+# #program gives the default filename (excluding .bas)
+# #autostart <line> automatically starts my NextBASIC from the given line
+# #autoline <start>,<step> allows me to code without line numbers and generates
+#           the line numbers for me. The down side is I can't use GOTO, but for
+#           performance reasons I'm avoiding this anyway.
+#
+# I'm also using my own custom #define keyword that helps me read code as a hash
+# lookup instead of having to track lots of different integer values. This
+# specific part means that this source code (that you're reading) won't compile
+# on the NextBASIC's version of txt2bas...sorry.
+
+; RND - by Remy Sharp 2020 / @rem / https://remysharp.com
+; Full commented source code at https://github.com/remy/next-rnd
+
+; Key variables
+; - %d[] - 161 large int array (takes up d(), e() and f()) that contains the player's path
+; - %m[] - scroller/marquee text
+; - %p() - Player "object", but actually an array, but using #define helped me treat as an object
+; - %s() - game state (holds the next tick, and scroller info)
+
+# Other variables are fair game, typically i, j, k are used for loops, and then
+# a, b, c, etc are used for arbitrary throw away values or strings.
+
+#define X=0
+#define Y=1
+#define FLAGS=2
+#define PATTERN=3
+#define POS=4
+#define ID=5
+#define FIRE=6
+#define BADDIES=7
+#define NUMBER=8
+#define DIRECTION=9
+
+#define NEXTTICK=0
+#define SCROLLPTR=1
+#define SCROLLMAX=2
+
+# note that I'm not using BANK NEW %b(...) because if the program stops and
+# starts # eventually I get out of memory. So instead, I'm running with 15
+# upwards (12-14 are the L2 shadow bank) and I'm happier there.
+#define SPRITES=15
+#define SPRITETILES=16
+#define TILES=17
+#define SFX=18
+
+; go fast
+RUN AT 3
+
+# try to reset/clean up the screen as quickly as possible before we start
+BORDER 0
+LAYER 2,1: INK 255: PAPER 0: CLS
+CLEAR
+PALETTE CLEAR
+SPRITE CLEAR
+
+PROC initOnce(): ; load assets
+PROC init(): ; initialise the user state
+; on brk cause a soft reset - otherwise I mess with the screen too much to recover
+ON ERROR PROC exit()
+PROC loop(): ; start the game
+
+DEFPROC loop()
+  REPEAT
+    %f=% SPRITE 17
+    %p(#FIRE)=%f
+
+# this speeds up the bullet movement a bit more, not ideal, but glitch is
+# expensive on the cpu cycles
+    IF %f THEN SPRITE MOVE : PROC checkFire()
+
+    PROC keyAndJoystick() TO %j
+    PROC updatePlayer(%j)
+    PROC drawPlayer()
+
+# use a count down tick to decide when to show a new number, then reset the countdown
+    IF %s(#NEXTTICK)=0 THEN PROC number() TO %i: PROC renderNumber(%i):%s(#NEXTTICK)=%( RND 40)+2
+
+    SPRITE MOVE
+    PROC checkFire(): ; has the player tried to shoot?
+
+    IF % RND 8=0 THEN PROC glitch(): ; glitch 1/8 chance
+    %s(#NEXTTICK)=%s(#NEXTTICK)-1
+
+  REPEAT UNTIL %p(#BADDIES)=0: ; play until there's no baddies/bombs left
+
+  DRIVER 49,2,2: ; win sfx effect
+  PROC renderNumber(%p(#NUMBER))
+  PROC addNumberToScroller(%p(#NUMBER)): ; insert the number into the scrolling text
+
+  %i=255
+  REPEAT
+# the next line is kind of hacky but it'll flash the selected number through the
+# entire 512 colour palette. It's kinda narly to be honest...
+    LAYER PALETTE 0,255,%i
+
+# if the far left sprite for the scroll has stopped moving, then we shuffle the
+# letters and kick it off again. I'm checking twice just to attempt to smooth
+# out the movement, otherwise there's a minor wait between the scroller stopping
+# the 32 pixel left movement and restarting the scroll.
+    IF % SPRITE CONTINUE 20&4=0 THEN PROC scroller()
+    %i=%(i+1)&511
+    IF % SPRITE CONTINUE 20&4=0 THEN PROC scroller()
+    SPRITE MOVE INT
+  REPEAT UNTIL 0
+ENDPROC
+
+# check if the bullet has hit a bomb and trigger the bomb animation and remove the bullet
+DEFPROC checkFire()
+# collision detect: the bullet is sprite 17, the bombs are 1 through 16 and I've
+# got a 4px offset so clipping the edge isn't good enough!
+  %h=% SPRITE OVER (17,1 TO 16,4,4)
+
+# only allow the bomb to be hit whilst the light (pattern) is in use
+  IF % SPRITE AT (h,2)&1 THEN ENDPROC
+
+  IF %h=0 THEN ENDPROC
+  SPRITE 17,,,,0: ; remove the bullet (flag=0)
+  SPRITE %h,,,12,1: ; I'm forcing the pattern on to 12 because some will animate through from p8-11
+  SPRITE CONTINUE %h,,,12 TO 16, BIN 01100000,5,0: ; explosion effect
+  DRIVER 49,2,0: ; play the explode sfx
+  %p(#BADDIES)=%p(#BADDIES)-1
+ENDPROC
+
+DEFPROC renderNumber(%i)
+# layer 1 is 12K so it's arranged in a way that the first 1/2 is at offset 0
+# and the second half is at offset 8192 - so to remove the last 8 lines, we
+# do (96/2-8) * 128 and remove 128*8, then start again on the top of the second
+# half - so these two statements are similar to LAYER ERASE x1,y1,x2,y2,277
+# remember that 227 is transparent (though I have to manually set this in
+# DEFPROC initOnce)
+  BANK 5 ERASE 5120,1024,227
+  BANK 5 ERASE 8192,1024,227
+
+# using modulo to work out four digits from a single value, so if our value is
+# 50, 50/1000 mod 10 is zero, so we end up with 0050
+  %j=%i/1000 MOD 10
+  TILE 2,2 AT %j*2,0 TO 4,5
+  %j=%i/100 MOD 10
+  TILE 2,2 AT %j*2,0 TO 6,5
+  %j=%i/10 MOD 10
+  TILE 2,2 AT %j*2,0 TO 8,5
+  %j=%i/1 MOD 10
+  TILE 2,2 AT %j*2,0 TO 10,5
+ENDPROC
+
+DEFPROC glitch()
+  %i=3
+  REPEAT
+    %h=%1+( RND 8): ; horizontal - which line to pick
+    %v=%( RND 5)-2: ; vertical - how many pixels to glitch left/right
+
+    ; decide whether to glitch the top half or bottom half of the screen
+    IF % RND 2 THEN %o=%$1800-(128*(h+1)): ELSE %o=%$2000+(128*h)
+
+    ; copy that slice and offset by the %v value
+    d$= BANK 5 PEEK$ (%o,96): ; slice a line of 128 bytes to create a glitch
+    BANK 5 POKE %o+v,d$: ; boom, we just messed with screen data!
+    %i=%i-1
+  REPEAT UNTIL %i=0
+ENDPROC
+
+DEFPROC number()
+  ; 1 and 5233 excluding 5000
+  %i=%( RND 5233)+1
+
+  ; skip 5000 - not the best code, but the simplest
+  IF %i=5000 THEN PROC number() TO %i
+
+  ; store the number in case that's the one we end up picking
+  %p(#NUMBER)=%i
+ENDPROC =%i
+
+; get joystick AND keyboard state in a compatible format (that of the joystick)
+; @returns bitmask: 1=right, 2=left, 4=down, 8=up
+DEFPROC keyAndJoystick()
+  %j= IN 31: ; check the joystick and then keys
+
+  %i=% IN $dffe
+  IF %i&2 THEN : ELSE %j=%j+@0010: ; O
+  IF %i&1 THEN : ELSE %j=%j+@0001: ; P
+  IF %31& IN 32766=30 THEN %j=%j+16: ; [space]
+
+ENDPROC =%j
+
+
+DEFPROC updatePlayer(%j)
+# though I don't tell the player, using O/P or joystick will shift the direction
+# of the rotation. By default the player is rotating clockwise where #direction
+# is positive 1 which is the fastest path through this code (marginally)
+  IF %j&2 THEN %p(#DIRECTION)=1
+  IF %j&1 THEN %p(#DIRECTION)=-1
+
+  %p(#POS)=%(p(#POS)+p(#DIRECTION)) MOD 172: ; auto move
+
+  ; handle edge case when we're going anti-clockwise and pos=0: (0 - 1) MOD 172 = 0xffff - yoinks
+  IF %p(#DIRECTION) > 1 THEN IF %(p(#POS)+p(#DIRECTION)) > 172 THEN %p(#POS)=171
+
+  ; lookup the coordinates
+  %i=%d[p(#POS)]
+
+  ; now convert to x/y
+  %x=%i >> 8
+  %y=%i&$ff
+
+  %p(#X)=%x
+  %p(#Y)=%y
+
+  %p(#FLAGS)=%0
+  %p(#PATTERN)=%0
+
+  ; set the directional flags based on where we are on the edge
+  IF %y=0 THEN %p(#FLAGS)=%@101
+  IF %y=176 THEN %p(#FLAGS)=%@1
+  IF %x=0 THEN %p(#FLAGS)=%@11
+  IF %x=240 THEN %p(#FLAGS)=%@1011
+
+  ; if nothing (above) matched, then we're in a corner
+  IF %p(#FLAGS)=0 THEN PROC edgeRotation()
+  IF %j&16 THEN PROC fire()
+ENDPROC
+
+DEFPROC edgeRotation()
+  %p(#PATTERN)=1
+  IF %y > 88 THEN : ELSE IF %x < 120 THEN %p(#FLAGS)=%@101: ELSE %p(#FLAGS)=%@1011
+  IF %y <= 88 THEN : ELSE IF %x < 120 THEN %p(#FLAGS)=%@1: ELSE %p(#FLAGS)=%@1001
+ENDPROC
+
+DEFPROC drawPlayer()
+  SPRITE %p(#ID),%p(#X)+32,%p(#Y)+32,%p(#PATTERN),%p(#FLAGS)
+ENDPROC
+
+DEFPROC drawBombs()
+# bomb sprites are from 1 to 16 surrounding the glitching numbers that flick on
+# and off through animation.
+  %k=20
+  FOR %i=1 TO 6
+    %j=%8+(( RND 2) << 1)
+    SPRITE %i,%76+(i*20),92,%j,1
+    SPRITE CONTINUE %i,,,%j TO %j+1, BIN 01000000,%20+( RND 40),0
+    %k=%k+1
+  NEXT %i
+
+  %j=%8+(( RND 2) << 1)
+  SPRITE 13,216,110,%j,1
+  SPRITE CONTINUE 13,,,%j TO %j+1, BIN 01000000,%20+( RND 40),0
+
+  %j=%8+(( RND 2) << 1)
+  SPRITE 14,216,130,%j,1
+  SPRITE CONTINUE 14,,,%j TO %j+1, BIN 01000000,%20+( RND 40),0+1
+
+  %k=%k+2
+  FOR %i=6 TO 1 STEP -1
+    %j=%8+(( RND 2) << 1)
+    SPRITE %i+6,%76+(i*20),148,%j,1
+    SPRITE CONTINUE %i+6,,,%j TO %j+1, BIN 01000000,%20+( RND 40),0
+    %k=%k+1
+  NEXT %i
+
+  %j=%8+(( RND 2) << 1)
+  SPRITE 15,76,130,%j,1
+  SPRITE CONTINUE 15,,,%j TO %j+1, BIN 01000000,%20+( RND 40),0
+
+  %j=%8+(( RND 2) << 1)
+  SPRITE 16,76,110,%j,1
+  SPRITE CONTINUE 16,,,%j TO %j+1, BIN 01000000,%20+( RND 40),0+1
+
+ENDPROC
+
+DEFPROC init()
+  %p(#ID)=%0
+  %p(#POS)=%104
+  %p(#BADDIES)=%16
+  %p(#DIRECTION)=%1
+  PROC updatePlayer(0)
+  PROC drawBombs()
+ENDPROC
+
+DEFPROC initOnce()
+# install drivers is outside of the #autoline code because it needs to handle
+# an edge case where the driver is already installed, so we try to uninstall
+# first and if *that* errors it uses GOTO - so this procedure exists in
+# line-number land.
+  PROC installDrivers()
+  LOAD "assets/rnd.afb" BANK %#SFX: ; sound effects that go with ayfx
+  DRIVER 49,1,%#SFX: ; init sfx to bank #SFX
+
+# L2 is our background (high res) and L1 is our glitching random number
+  LAYER 2,1
+  BORDER 0: PAPER 0: CLS
+  LOAD "assets/intro.sl2" LAYER
+
+# do a bunch of work whilst the player is reading the text on the intro screen
+  LOAD "assets/ship.spr" BANK %#SPRITES
+  LOAD "assets/tiles.spr" BANK %#SPRITETILES
+  LOAD "assets/numbers.map" BANK %#TILES
+
+  SPRITE BANK %#SPRITES
+  SPRITE BORDER 0
+  SPRITE PRINT 1
+
+# load the predefined path for the sprite to travel looking for a zero byte to terminate
+  %i=0
+  REPEAT
+    READ %a
+    WHILE %a <> 0
+    %d[i]=%a
+    %i=%i+1
+  REPEAT UNTIL 0
+
+# load up the data for the scroller whilst
+  PROC scrollerSetup()
+
+  ; wait for a complete keypress or fire button
+  REPEAT : REPEAT UNTIL INKEY$ =""
+  REPEAT : REPEAT UNTIL INKEY$ <> "" OR ( IN 31=16)
+  REPEAT : REPEAT UNTIL INKEY$ =""
+
+  LOAD "assets/intro2.sl2" LAYER
+
+  ; wait again
+  REPEAT : REPEAT UNTIL INKEY$ =""
+  REPEAT : REPEAT UNTIL INKEY$ <> "" OR ( IN 31=16)
+  REPEAT : REPEAT UNTIL INKEY$ =""
+
+# this line will allow for a clean(er) transition from the previous LOAD "" LAYER
+# to the new one. without it, you'll get a flash of white (though I'm not totally
+# convinced - but it looks faster to me...)
+  LOAD "assets/grad-9.bin" BANK 9
+  LOAD "assets/grad-10.bin" BANK 10
+  LOAD "assets/grad-11.bin" BANK 11
+
+# now select L1 for my main work. Since L1 works with a 15 color palette, I need
+# to manually insert the transparent index (palette value 455 typically found at
+# index 227). Once transparent is in the L1 palette, clearing the screen will
+# now reveal the L2 contents beneath.
+
+  LAYER 1,0
+  LAYER PALETTE 0,0,0: ; select transparent
+  LAYER PALETTE 0,255,511: ; select transparent
+  LAYER PALETTE 0,227,455: ; select transparent
+  BORDER 0: INK 255: PAPER 227: CLS : ; reveal the L2 graphic
+  LAYER OVER 2
+
+# note that the following lines, for reasons that escape me, can't happen before
+# the L1 select - otherwise I end up with no numbering being shown. It's odd,
+# but not a big deal.
+  TILE BANK %#SPRITETILES: ; point tilemap to spritesheet
+  TILE DIM %#TILES,0,21,8: ; using tile bank 14, offset 0, tile 32 wide, tile size 8
+
+ENDPROC
+
+DEFPROC fire()
+  ; if bullet is still moving then exit
+  IF %p(#FIRE) THEN ENDPROC
+
+  ; play the sound
+  DRIVER 49,2,1
+
+  SPRITE 17,%p(#X)+32,%p(#Y)+32,%p(#PATTERN)+4,%p(#FLAGS)
+
+  ; edge firing
+  IF %p(#X)=0 THEN PROC shootRight(): ENDPROC
+  IF %p(#X)=240 THEN PROC shootLeft(): ENDPROC
+  IF %p(#Y)=0 THEN PROC shootDown(): ENDPROC
+  IF %p(#Y)=176 THEN PROC shootUp(): ENDPROC
+
+  ; diagonal firing - when the player is in the corners
+  IF %p(#X) < 160 AND (p(#Y) < 128) THEN PROC shootFromTopLeft(): ENDPROC
+  IF %p(#X) > 160 AND (p(#Y) < 128) THEN PROC shootFromTopRight(): ENDPROC
+  IF %p(#X) > 160 AND (p(#Y) > 128) THEN PROC shootFromBottomRight(): ENDPROC
+  IF %p(#X) < 160 AND (p(#Y) > 128) THEN PROC shootFromBottomLeft(): ENDPROC
+
+ENDPROC
+
+DEFPROC shootFromTopLeft()
+  SPRITE CONTINUE 17,%p(#X)+32 TO 260 STEP 4 RUN ,%p(#Y)+32 TO 200 STEP 4 RUN ,%p(#PATTERN)+4, BIN 11,0,0
+ENDPROC
+
+DEFPROC shootFromTopRight()
+  SPRITE CONTINUE 17,32 TO %p(#X)+32 STEP -4 RUN ,%p(#Y)+32 TO 200 STEP 4 RUN ,%p(#PATTERN)+4, BIN 11,0,0
+ENDPROC
+
+DEFPROC shootFromBottomRight()
+  SPRITE CONTINUE 17,32 TO %p(#X)+32 STEP -4 RUN ,32 TO %p(#Y)+32 STEP -4 RUN ,%p(#PATTERN)+4, BIN 11,0,0
+ENDPROC
+
+DEFPROC shootFromBottomLeft()
+  SPRITE CONTINUE 17,%p(#X)+32 TO 260 STEP 4 RUN ,32 TO %p(#Y)+32 STEP -4 RUN ,%p(#PATTERN)+4, BIN 11,0,0
+ENDPROC
+
+DEFPROC shootRight()
+  SPRITE CONTINUE 17,32 TO 260 STEP 4 RUN , STOP ,%p(#PATTERN)+4, BIN 11,0,0
+ENDPROC
+
+DEFPROC shootLeft()
+  SPRITE CONTINUE 17,32 TO 240 STEP -4 RUN , STOP ,%p(#PATTERN)+4, BIN 11,0,0
+ENDPROC
+
+DEFPROC shootDown()
+  SPRITE CONTINUE 17, STOP ,32 TO 200 STEP 4 RUN ,%p(#PATTERN)+4, BIN 11,0,0
+ENDPROC
+
+DEFPROC shootUp()
+  SPRITE CONTINUE 17, STOP ,32 TO 176 STEP -4 RUN ,%p(#PATTERN)+4, BIN 11,0,0
+ENDPROC
+
+DEFPROC addNumberToScroller(%i)
+  ; this is a bit of nonsense, but it's because STR$ %a isn't a thing we can do
+  a=%i/1000 MOD 10
+  b=%i/100 MOD 10
+  c=%i/10 MOD 10
+  d=%i/1 MOD 10
+
+  a$= STR$ a
+  b$= STR$ b
+  c$= STR$ c
+  d$= STR$ d
+
+  PROC addNumberToScrollerSub(162)
+  PROC addNumberToScrollerSub(182)
+  PROC addNumberToScrollerSub(215)
+  PROC addNumberToScrollerSub(280)
+  PROC addNumberToScrollerSub(327)
+  PROC addNumberToScrollerSub(361)
+  PROC addNumberToScrollerSub(401)
+ENDPROC
+
+DEFPROC addNumberToScrollerSub(i)
+  s$(i)=a$
+  s$(i+1)=b$
+  s$(i+2)=c$
+  s$(i+3)=d$
+ENDPROC
+
+DEFPROC scrollerSetup()
+  READ s$
+  %s(#SCROLLMAX)= LEN s$
+  %s(#SCROLLPTR)=0
+ENDPROC
+
+DEFPROC scroller()
+  FOR %i=1 TO 9
+    %p=% SPRITE AT (20+i,2)
+    IF %p=0 THEN PROC getLetter() TO %p
+    SPRITE %19+i,%32*i,160,%p,1,0,1,1
+    SPRITE CONTINUE %19+i,%32*(i-1) TO %32*i STEP -2 RUN , STOP ,%p, BIN 00010010,1,0
+  NEXT %i
+ENDPROC
+
+DEFPROC getLetter()
+  LOCAL %i
+  %i=%(s(#SCROLLPTR) MOD s(#SCROLLMAX))+1: ; roll through the letters
+  %s(#SCROLLPTR)=%i: ; update the point
+  i=%i
+  %i= CODE s$(i): ; convert the letter to charcode
+
+  ; custom adjust for when I know the chars are in the wrong place
+  IF %i=32 THEN ENDPROC =%63
+  IF %i=33 THEN ENDPROC =%30: ; !
+  IF %i=46 THEN ENDPROC =%31: ; .
+  IF %i=44 THEN ENDPROC =%32: ; ,
+  IF %i=39 THEN ENDPROC =%33: ; '
+ENDPROC =%i-28
+
+DEFPROC exit()
+# because I had consumed banks, installed drivers and called various POKEs that
+# put the player's computer in an odd state, I figured that the best thing to do
+# was to restart the machine when they wanted to bail.
+  REG 2,1: ; soft reset
+ENDPROC
+
+# this data represents X/Y coordinate data to the running track around the edge
+# 0 is the terminator - so I could adjust these values down the line. The dataset
+# was mostly generated using code (generating value around a rectangle) then
+# slightly manipulated by hand to get the tilted edges the way I wanted.
+# It also made more sense to hard code these values rather than try to calculate
+# them on the fly so as to keep more cycles free.
+# Also, since the range of X/Y is < 256 and int values in NextBASIC are 16bit,
+# it makes sense to make the value as X (high byte) Y (low byte) so I can shift
+# and AND values out (instead of division and modulo).
+DATA 52400,51376,50352,49328,48304,47280,46256,45232,44208,43184,42160,41136,40112,39088,38064,37040,36016
+DATA 34992,33968,32944,31920,30896,29872,28848,27824,26800,25776,24752,23728,22704,21680,20656,19632,18608
+DATA 17584,16560,15536,14512,13488,12464,11440,10416,9389,8361,7333,6305,5277,4249,3221,2193,1165
+DATA 137,133,129,125,121,117,113,109,105,101,97,93,89,85,81,77,73
+DATA 69,65,61,57,53,49,45,41,37,33,1053,2073,3093,4113,5133,6153,7173
+DATA 8193,9216,10240,11264,12288,13312,14336,15360,16384,17408,18432,19456,20480,21504,22528,23552,24576
+DATA 25600,26624,27648,28672,29696,30720,31744,32768,33792,34816,35840,36864,37888,38912,39936,40960,41984
+DATA 43008,44032,45056,46080,47104,48128,49152,50176,51200,52226,53254,54282,55310,56338,57366,58394,59422
+DATA 60450,61478,61482,61486,61490,61494,61498,61502,61506,61510,61514,61518,61522,61526,61530,61534,61538
+DATA 61542,61546,61550,61554,61558,61562,61566,61570,61574,61578,61582,60562,59542,58522,57502,56482,55462
+DATA 54442,53422
+DATA 0
+
+# this is the scroller text, the 0000 string is replaced once the "game" is complete
+DATA "          CONGRATULATIONS! YOU DID IT! YOU SAVED THE NUMERICS FROM A FATE WORSE THAN BEING FORCED TO WATCH EVERY EPISODE OF FRIENDS. THE NUMERICS HAVE GIVEN YOU 0000, THAT'S RIGHT, 0000 IS YOURS FOR ALL TIME. KEEP 0000 SAFE BECAUSE YOU'RE NOW BOUND FOR ALL TIME. REMEMBER TO PET 0000 OTHERWISE THEY GET GROUCHY, AND DON'T GET 0000 WET AND DEFINITELY DON'T LET 0000 EAT AFTER MIDNIGHT. NOW YOU'VE GOT 0000 HOW ABOUT REWARDING REMY WITH THE RUSTY PIXELS GAME, EH?"
+
+
+#autoline
+
+9000 DEFPROC installDrivers()
+9010 ON ERROR GO TO 9030
+9020 .uninstall "assets/ayfx.drv"
+9030 .install "assets/ayfx.drv"
+9040 ON ERROR
+9050 ENDPROC
+
+9999 SAVE "rnd.bas" LINE 1
