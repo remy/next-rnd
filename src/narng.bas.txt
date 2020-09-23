@@ -1,6 +1,6 @@
 #autoline 10
 #autostart 10
-#program rnd
+#program narng
 
 # *** INTRODUCTION ****
 # Where I've used "#" for a comment, I'm giving you, the reader, more insight.
@@ -17,6 +17,8 @@
 # glitch stops and you're given a random number.
 #
 # -------------------
+#
+# NARNG = Not Another Randomish Numeric Gunner
 #
 # ** Code features **
 #
@@ -184,10 +186,12 @@ DEFPROC checkFire()
 # got a 4px offset so clipping the edge isn't good enough!
   %h=% SPRITE OVER (17,1 TO 16,4,4)
 
-# only allow the bomb to be hit whilst the light (pattern) is in use
-  IF % SPRITE AT (h,2)&1 THEN ENDPROC
-
   IF %h=0 THEN ENDPROC
+
+# only allow the bomb to be hit whilst the light (pattern) is in use
+  %k=% SPRITE AT (h,2)
+  IF %k=8 OR (k=10) THEN : ELSE ENDPROC
+
   SPRITE 17,,,,0: ; remove the bullet (flag=0)
   SPRITE %h,,,12,1: ; I'm forcing the pattern on to 12 because some will animate through from p8-11
   SPRITE CONTINUE %h,,,12 TO 16, BIN 01100000,5,0: ; explosion effect
@@ -577,5 +581,3 @@ DATA "          CONGRATULATIONS! YOU DID IT! YOU SAVED THE NUMERICS FROM A FATE 
 9030 .install "assets/ayfx.drv"
 9040 ON ERROR
 9050 ENDPROC
-
-9999 SAVE "rnd.bas" LINE 1

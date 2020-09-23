@@ -1,4 +1,4 @@
-# Next Random Number Generator
+# Next: A Random Number Generator (sorta…)
 
 Literally the last PRNG you'll ever need… assuming you need a number between 1 and 5233 and not including 5000, then this is perfect. Oh, also it takes a while to get the number too.
 
@@ -13,6 +13,8 @@ The source code is fully documented in [rnd.bas.txt](https://github.com/remy/nex
 
 The pre-compiled source is also available.
 
+[Download here](https://remysharp.itch.io/next-narng) (just so I get some stats - it's free though!)
+
 Enjoy.
 
-![](https://github.com/remy/next-rnd/blob/master/misc/screenshot.png)
+![](https://raw.githubusercontent.com/remy/next-rnd/main/misc/screenshot.png)
